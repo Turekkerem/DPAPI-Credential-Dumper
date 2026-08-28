@@ -83,4 +83,5 @@ g++ main.cpp sqlite3.o -o DPAPI_PoC.exe -lcrypt32 -lbcrypt -ladvapi32 -lwlanapi 
 > 3. Any attempt to deploy this code against systems, networks, or data without proper authorization constitutes a CRIMINAL OFFENSE and violates applicable laws (including the Computer Fraud and Abuse Act and similar international regulations).
 >
 > **THE USER BEARS FULL CRIMINAL AND CIVIL LIABILITY for all actions performed using this tool.**
+
 *(Note: Yes, I used AI because after sitting for 6 hours I asked AI and it said it didn't really know where the error was - after 10 prompts it finally said that well, the wlanapi library can block with wcout-s)*
