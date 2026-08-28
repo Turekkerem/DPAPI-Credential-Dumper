@@ -36,29 +36,61 @@ namespace SystemCredentialsDump {
     }
 
     // --- 1. WINDOWS CREDENTIAL MANAGER ---
+    // --- 1. WINDOWS CREDENTIAL MANAGER (WITH FULL HEX/ASCII PREVIEW) ---
+    inline void PrintHexAndAscii(const BYTE* data, DWORD size) {
+        std::cout << "Data (HEX/ASCII): ";
+        for (DWORD i = 0; i < size; ++i) {
+            std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)data[i] << " ";
+        }
+        std::cout << "\nText (ASCII/UTF8): ";
+        for (DWORD i = 0; i < size; ++i) {
+            char c = (char)data[i];
+            if (c >= 32 && c <= 126) {
+                std::cout << c;
+            } else {
+                std::cout << ".";
+            }
+        }
+        std::cout << std::dec << std::endl;
+    }
+
     inline void DumpCredManager() {
         std::cout << "\n=== WINDOWS CREDENTIAL MANAGER ===\n";
         DWORD count = 0;
         PCREDENTIALW* pcredentials = NULL;
 
         if (CredEnumerateW(NULL, 0, &count, &pcredentials)) {
-            std::cout << "We have found this much records: " << count << "\n";
+            std::cout << "Found entries: " << count << std::endl;
+            std::cout << "----------------------------------------" << std::endl;
+
             for (DWORD i = 0; i < count; ++i) {
                 PCREDENTIALW cred = pcredentials[i];
-                std::cout << "Target: " << (cred->TargetName ? WStringToString(cred->TargetName) : "(Absence)");
-                std::cout << " | User: " << (cred->UserName ? WStringToString(cred->UserName) : "(Absence)");
+
+                std::wcout << L"Target:        " << (cred->TargetName ? cred->TargetName : L"(none)") << std::endl;
+                std::wcout << L"User:          " << (cred->UserName ? cred->UserName : L"(none)") << std::endl;
 
                 if (cred->CredentialBlobSize > 0 && cred->CredentialBlob != NULL) {
-                    if (cred->CredentialBlobSize % 2 == 0) {
-                        std::wstring secret(reinterpret_cast<wchar_t*>(cred->CredentialBlob), cred->CredentialBlobSize / sizeof(wchar_t));
-                        std::cout << " | Haslo: " << WStringToString(secret);
+                    BYTE* blob = reinterpret_cast<BYTE*>(cred->CredentialBlob);
+                    DWORD blobSize = cred->CredentialBlobSize;
+
+                    bool isUtf16 = (blobSize >= 2 && blobSize % 2 == 0);
+                    
+                    if (isUtf16) {
+                        std::wstring secret(reinterpret_cast<wchar_t*>(blob), blobSize / sizeof(wchar_t));
+                        std::wcout << L"Password/Token (UTF16): " << secret << std::endl;
                     }
+
+                    PrintHexAndAscii(blob, blobSize);
+                } else {
+                    std::cout << "Password/Token: (empty)" << std::endl;
                 }
-                std::cout << "\n";
+
+                std::cout << "----------------------------------------" << std::endl;
             }
+
             CredFree(pcredentials);
         } else {
-            std::cout << "[-] No records in Credential Manager.\n";
+            std::cout << "Enumeration error. Code: " << GetLastError() << std::endl;
         }
     }
 
