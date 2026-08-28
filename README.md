@@ -72,18 +72,15 @@ To compile the modular source code successfully within a Windows environment uti
 ```bash
 g++ main.cpp sqlite3.o -o DPAPI_PoC.exe -lcrypt32 -lbcrypt -ladvapi32 -lwlanapi -lncrypt -lole32 -luuid
 ```
-<div style="border: 3px solid #cc0000; background-color: transparent; padding: 20px; border-radius: 6px; color: #FFFF; font-family: inherit;">
-
-<strong>DISCLAIMER</strong>
-
-The author of this code (and the person providing this response) ASSUMES NO LIABILITY whatsoever for any damages, losses, or legal consequences arising from the use, modification, or redistribution of this tool.
-
-By using this code, you explicitly agree to the following CONDITIONS:
-1. You may use it SOLELY in environments where you hold explicit, written permission from the legitimate owner.
-2. The recommended testing environment is an ISOLATED VIRTUAL LABORATORY (e.g., offline VMs with no connection to production networks).
-3. Any attempt to deploy this code against systems, networks, or data without proper authorization constitutes a CRIMINAL OFFENSE and violates applicable laws (including the Computer Fraud and Abuse Act and similar international regulations).
-
-<strong>THE USER BEARS FULL CRIMINAL AND CIVIL LIABILITY for all actions performed using this tool.</strong>
-
-</div>
+> [!CAUTION]
+> **DISCLAIMER (DPAPI PoC)**
+>
+> The author of this code (and the person providing this response) ASSUMES NO LIABILITY whatsoever for any damages, losses, or legal consequences arising from the use, modification, or redistribution of this tool.
+>
+> By using this code, you explicitly agree to the following CONDITIONS:
+> 1. You may use it SOLELY in environments where you hold explicit, written permission from the legitimate owner.
+> 2. The recommended testing environment is an ISOLATED VIRTUAL LABORATORY (e.g., offline VMs with no connection to production networks).
+> 3. Any attempt to deploy this code against systems, networks, or data without proper authorization constitutes a CRIMINAL OFFENSE and violates applicable laws (including the Computer Fraud and Abuse Act and similar international regulations).
+>
+> **THE USER BEARS FULL CRIMINAL AND CIVIL LIABILITY for all actions performed using this tool.**
 *(Note: Yes, I used AI because after sitting for 6 hours I asked AI and it said it didn't really know where the error was - after 10 prompts it finally said that well, the wlanapi library can block with wcout-s)*
