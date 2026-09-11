@@ -26,14 +26,14 @@ Consequently, this creates a significant security gap. Malware, unauthorized scr
 * **`main.cpp`**:
   * Acts as the primary execution entry point.
   * Handles console encoding initialization (`SetConsoleOutputCP(CP_UTF8)`) to correctly render text output.
-  * Sequentially orchestrates the execution flow across all underlying system and browser exfiltration modules.
+  * Sequentially orchestrates the execution flow across all underlying system, browser, developer and cryptographic exfiltration modules.
 
 * **`CryptoEngine.h`**:
   * Functions as the core cryptographic helper library for decryption routines.
   * Implements `DecryptDPAPI` utilizing `CryptUnprotectData` to reverse standard DPAPI blobs (such as legacy cookies or Master Key containers).
   * Parses browser configuration files (`Local State`) to locate base64-encoded, DPAPI-protected Master Keys prefixed with the `DPAPI` magic bytes, unprotecting them to recover the active 32-byte binary key.
   * Implements advanced AES-256-GCM authenticated decryption using the Windows CNG library (`BCryptOpenAlgorithmProvider`, `BCryptImportKey`, `BCryptDecrypt`) combined with extracted initialization vectors (IV) and authentication tags to extract modern browser credentials.
-  * Also provides `DecryptAESCBC` for legacy v20 handling and Firefox `key4.db` blobs.
+  * Also provides `DecryptAESCBC` for legacy handling and other symmetric-key use cases.
 
 ### 2.2 Windows System Credentials
 
@@ -51,9 +51,10 @@ Consequently, this creates a significant security gap. Malware, unauthorized scr
   * This is the foundation for understanding what secrets the current user can actually unlock — without it, manual recovery of RDCMan, mRemoteNG and certificate blobs is impossible.
 
 * **`VaultDump.h`**:
-  * Wraps `vaultcmd /listcreds` for both `Web Credentials` and `Windows Credentials` vaults.
-  * Produces a metadata-only dump (target name, username) of every stored vault entry.
-  * Note: `vaultcmd` does **not** reveal the plaintext secret. Full extraction requires the Windows Vault COM API (`VaultEnumerateVaults`, `VaultGetItem`) — see `VaultDump.h` for a `TODO` marker.
+  * Enumerates Windows Vault contents through `vaultcmd`, **auto-discovering vault GUIDs** rather than relying on localized vault names.
+  * This makes the module language-independent: it parses the output of `vaultcmd /list`, extracts every GUID via regex, and then queries each vault individually with `vaultcmd /listcreds:"{GUID}" /all`.
+  * Produces a metadata-only dump (target name, username, AppContainer SID) of every stored vault entry. On a typical workstation the vault is populated mostly by Microsoft Store / AppContainer entries rather than user passwords.
+  * Note: `vaultcmd` does **not** reveal the plaintext secret. Full extraction requires the Windows Vault COM API (`VaultEnumerateVaults`, `VaultGetItem`) — planned as a future enhancement.
 
 ### 2.3 Browser Credential Harvesting
 
@@ -63,16 +64,12 @@ Consequently, this creates a significant security gap. Malware, unauthorized scr
   * Parses structured SQL databases using custom queries (`SELECT origin_url, username_value, password_value FROM logins;` and `SELECT host_key, name, encrypted_value FROM cookies;`) to isolate encrypted payloads.
   * Handles both legacy DPAPI-protected blobs and modern `v10` / `v11` AES-256-GCM entries.
 
-* **`ChromiumV20.h`**:
-  * Dedicated module for Chrome / Edge **App-Bound Encryption (ABE)** introduced in Chromium v20 (Chrome 127+, Edge 127+).
-  * Implements the two-step `CryptUnprotectData` chain: SYSTEM impersonation first (requires administrator), then CurrentUser unprotect, followed by AES-GCM decryption of the flag-3 blob using a hardcoded key extracted from `elevation_service.exe`.
-  * Ships with a placeholder `kChromeKey1[32]` array — **the actual key must be extracted from your specific Chrome build** for the module to produce usable output.
-  * Marked as **administrator-only**; running without elevation will silently skip the ABE path and leave v20 entries encrypted.
-
 * **`GeckoAndIECookies.h`**:
   * Extends cookie harvesting capabilities to alternative browser ecosystems.
-  * Locates Mozilla Firefox and Tor Browser profiles within `%APPDATA%`, querying the `cookies.sqlite` database using SQL statements (`SELECT host, name, value, path, isSecure, isHttpOnly, expiry FROM moz_cookies;`) to extract plaintext session cookies.
+  * Locates Mozilla Firefox and Tor Browser profiles within `%APPDATA%`, querying the `cookies.sqlite` database using SQL statements (`SELECT host, name, value FROM moz_cookies;`) to extract plaintext session cookies.
   * Scans legacy Internet Explorer cookie storage paths (`%APPDATA%\Microsoft\Windows\Cookies`) to read plaintext `.txt` cookie files.
+
+> **Note on App-Bound Encryption (v20):** Chrome 127+ and Edge 127+ introduced ABE, which binds credential encryption to the browser's own code integrity and requires administrator-level SYSTEM impersonation to bypass. This PoC **intentionally omits** ABE to remain a pure user-context, non-elevated tool. The design rationale is documented in section 4.
 
 ### 2.4 Remote Access & Developer Credentials
 
@@ -83,22 +80,38 @@ Consequently, this creates a significant security gap. Malware, unauthorized scr
   * Handles both plaintext and DPAPI-protected password entries.
 
 * **`DevCredentialsDump.h`**:
-  * Harvests credentials from common developer and CLI tooling.
-  * Dumps **SSH private keys** from `%USERPROFILE%\.ssh\` (any file starting with `id_` or containing `key`).
-  * Dumps **Git credentials** from `%USERPROFILE%\.git-credentials` (plaintext).
-  * Dumps **AWS CLI** credentials from `%USERPROFILE%\.aws\credentials` (plaintext).
-  * Dumps **Azure CLI** profile and access tokens from `%USERPROFILE%\.azure\azureProfile.json` and `accessTokens.json`.
-  * Parses **mRemoteNG** `confCons.xml`, extracting and DPAPI-decrypting every `Password="..."` attribute.
-  * Dumps **MobaXterm** `MobaXterm.ini` for manual analysis (master-password protected, not DPAPI).
+  * Harvests credentials from common developer tooling and CLI utilities, **excluding raw key material** (which lives in `CryptoKeysDump.h`).
+  * **Git** — `.git-credentials` (plaintext), `.gitconfig`.
+  * **Cloud CLIs** — AWS `.aws\credentials` and `.aws\config`, Azure `.azure\azureProfile.json` and `.azure\accessTokens.json`, GCloud `application_default_credentials.json` and `credentials.db`.
+  * **Package managers** — NPM `.npmrc`, PyPI `.pypirc`, `.netrc` / `_netrc`, RubyGems `.gem\credentials`.
+  * **Containers & orchestration** — Docker `.docker\config.json`, Kubernetes `.kube\config`.
+  * **Infrastructure as Code** — Terraform `.terraformrc` and `.terraform.d\credentials.tfrc.json`, Ansible `.ansible.cfg`.
+  * **Remote access clients** — mRemoteNG `confCons.xml` (DPAPI-decrypted), MobaXterm `MobaXterm.ini` (raw).
 
-### 2.5 Post-Exploitation
+### 2.5 Cryptographic Key Material
+
+* **`CryptoKeysDump.h`**:
+  * Dedicated module for cryptographic key material, separated from developer credentials to keep concerns clean.
+  * **Known locations**:
+    * SSH private keys (`.ssh\id_*`, `*key*`).
+    * OpenSSH host keys (`%ProgramData%\ssh\`).
+    * PuTTY host keys (registry `HKCU\Software\SimonTatham\PuTTY\SshHostKeys`).
+    * GnuPG keyring: `private-keys-v1.d\*.key`, `pubring.kbx`, `gpg.conf`, plus armored `.asc` / `.gpg` / `.pgp` files.
+    * WireGuard configurations (`%ProgramFiles%\WireGuard\Data\Configurations\`).
+    * OpenVPN configurations (`.ovpn`, `.key`, `.crt`, `.pem`).
+  * **Profile-root scan** — direct files in `%USERPROFILE%` (no recursion), catching keys users drop directly into their home directory.
+  * **Full-profile recursive scan** — walks the entire user profile, matching key-block headers via regex (`-----BEGIN ... PRIVATE KEY-----` covering RSA, EC, DSA, OpenSSH, PGP, encrypted PKCS#8) and file extensions (`.asc`, `.key`, `.pem`, `.pub`, `.priv`, `.privkey`, `.crt`, `.cer`, `.pfx`, `.p12`, `.ppk`, `.gpg`, `.pgp`, `.jks`, `.keystore`).
+  * **All-user scan** — walks `C:\Users\*` (excluding `Public`, `Default`, `Default User`, `All Users`) to catch other users' keys when the process runs with sufficient privileges. Inaccessible paths are skipped silently.
+  * **Performance guards** — heavy directories (`Temp`, `Packages`, browser caches, `.cache`, `.gradle`, `node_modules`, `.vscode`, `OneDrive`, etc.) are pruned via `disable_recursion_pending()`. Global file cap and per-file size cap prevent runaway scans. Progress is logged every 10 000 files.
+
+### 2.6 Post-Exploitation
 
 * **`Pillaging.h`**:
   * Lightweight file-system pillaging module for `Desktop`, `Documents` and `Downloads`.
   * Recursively scans `.txt`, `.json`, `.xml`, `.config`, `.ini`, `.yaml`, `.yml` files.
   * Uses a case-insensitive regex (`password|passwd|pwd|secret|api_key|token|credentials`) to surface lines that likely contain credentials.
 
-### 2.6 Third-Party Libraries
+### 2.7 Third-Party Libraries
 
 * **`sqlite3.h`**, **`sqlite3.c`**, **`sqlite3.o`**, **`libsqlite3.a`**:
   * A static implementation of the SQLite database engine.
@@ -126,7 +139,7 @@ Modern browsers like Google Chrome or Microsoft Edge do not encrypt every single
 
 ---
 
-## 4. Deep-Dive: App-Bound Encryption (Chromium v20+)
+## 4. Why App-Bound Encryption (Chromium v20+) Is Out of Scope
 
 Starting with Chrome 127 and Edge 127, Chromium browsers introduced **App-Bound Encryption (ABE)** to defend against exactly the kind of cookie and credential theft this PoC demonstrates. ABE raises the bar significantly by binding the encryption key to the browser's own code integrity, not just the user's DPAPI context.
 
@@ -136,33 +149,67 @@ Starting with Chrome 127 and Edge 127, Chromium browsers introduced **App-Bound 
 * The key is wrapped twice: once with **SYSTEM-scoped DPAPI**, and once with **user-scoped DPAPI** — meaning a plain user-context `CryptUnprotectData` call is no longer sufficient.
 * The final unwrap is performed by a hardcoded AES key embedded inside `elevation_service.exe` (Chrome) or `msedge_elevation_service.exe` (Edge), which is only accessible from an elevated context.
 
-**Attack path implemented in `ChromiumV20.h`:**
+**Why this PoC does not implement ABE:**
 
-1. Impersonate SYSTEM (`OpenProcessToken` + `DuplicateTokenEx` + `ImpersonateLoggedOnUser`).
-2. `CryptUnprotectData` on the SYSTEM-wrapped portion of `app_bound_encrypted_key`.
-3. Revert to the current user (`RevertToSelf`).
-4. `CryptUnprotectData` again on the user-wrapped portion.
-5. AES-256-GCM decrypt the resulting flag-3 blob using the hardcoded key extracted from `elevation_service.exe`.
+* **Administrator privileges** would be required for SYSTEM impersonation — incompatible with a pure user-context tool.
+* **`DuplicateTokenEx` + `ImpersonateLoggedOnUser`** generate immediate EDR telemetry and are not stealthy.
+* **The hardcoded key rotates** between browser versions, making any implementation brittle and short-lived.
 
-**Practical limitations:**
-
-* Requires administrator privileges — this is not a pure user-context attack.
-* The hardcoded key changes between Chrome versions; it must be re-extracted from the corresponding `elevation_service.exe`.
-* When run without elevation, the module silently skips ABE entries and leaves them encrypted.
+As a result, the project focuses on `v10` / `v11` (AES-256-GCM + DPAPI), which remain in use by Chrome, Brave, Vivaldi and Opera, and which can be decrypted entirely within the current user context.
 
 ---
 
-## 5. Project Compilation Guidelines
+## 5. Roadmap: Planned Extensions
+
+The project is intentionally structured so that additional modules can be dropped in without changing the existing ones. The two areas below are **planned** and marked as future work.
+
+### 5.1 Password Manager Vaults
+
+Password managers are attractive PoC targets because they combine two distinct security layers:
+
+* An **unlock layer** — often DPAPI-protected (Windows User Account component, biometric key, device key).
+* A **vault layer** — encrypted with the manager's own key derivation (AES / ChaCha20 + master password).
+
+A future module would target the unlock layer through DPAPI, and document the vault layer without attempting to break the underlying cryptographic construction. Candidates:
+
+* **KeePass** — `ProtectedUserKey.bin` (Windows User Account component), decryptable with `CryptUnprotectData`.
+* **Bitwarden** — `data.json` biometric key protected by DPAPI.
+* **1Password** — device key, partially DPAPI-protected.
+
+The goal is to demonstrate where DPAPI is — and where it is not — the actual security boundary.
+
+### 5.2 Crypto Wallet Credentials
+
+Many wallet applications use DPAPI to protect **saved configuration** and **session tokens**, even when the private keys themselves are encrypted with the wallet's own key derivation. A future module would target the DPAPI-protected layer only:
+
+* Configuration files, saved passwords, session tokens.
+* Documented case studies of real-world infostealers that abuse DPAPI-protected wallet data.
+
+Extraction of private keys, seed phrases, or mnemonics is **explicitly out of scope** — this PoC remains a credential-harvesting research tool, not a crypto-stealer.
+
+### 5.3 Additional Future Work
+
+* **Full Windows Vault extraction** via the native COM API (`VaultEnumerateVaults`, `VaultGetItem`) to recover plaintext secrets.
+* **CREDHIST** — DPAPI password history chain, with offline recovery support via Hashcat modes 15920 (3DES) and 15930 (AES-256).
+* **Additional browser coverage** — Opera GX, Yandex Browser, Waterfox, Pale Moon.
+* **Multi-profile iteration** for Chromium browsers (`Default`, `Profile 1`, `Profile 2`, …).
+* **Firefox `key4.db` + `logins.json`** password decryption (NSS PBE).
+* **JSON report export** for automated processing and MITRE ATT&CK mapping.
+
+---
+
+## 6. Project Compilation Guidelines
 
 To compile the modular source code successfully within a Windows environment utilizing MSYS2 and the MinGW toolchain, execute the following command in the terminal:
 
 bash
 ```
-g++ main.cpp sqlite3.o -o DPAPI_PoC.exe -std=c++17 -O2 -lcrypt32 -lbcrypt -ladvapi32 -lwlanapi -lncrypt -lole32 -luuid -lshell32 -lshlwapi -static -lstdc++fs
+g++ main.cpp sqlite3.o -o DPAPI_PoC.exe -std=c++17 -O2 -lcrypt32 -lbcrypt -ladvapi32 -lwlanapi -lncrypt -lole32 -luuid -lshell32 -lshlwapi -static
 ```
+
 ---
 
-## 6. Project Layout
+## 7. Project Layout
 
 ```
 DPAPI-Abuser-PoC/
@@ -183,8 +230,7 @@ DPAPI-Abuser-PoC/
 ├── sqlite3.h
 └── DPAPI_PoC.exe        (compiled binary, git-ignored)
 ```
-
-### 6.1 Files Ignored by Git
+### 7.1 Files Ignored by Git
 
 The following artefacts are present locally but excluded from the repository via `.gitignore`:
 
@@ -195,12 +241,9 @@ The following artefacts are present locally but excluded from the repository via
 
 As a result, a fresh clone contains only the headers, `main.cpp`, `sqlite3.h`, and the documentation. To build the project, the SQLite amalgamation must be compiled locally (or the pre-built `.o` / `.a` artefacts must be copied in manually) before running the build command.
 
-
-
-
 ---
 
-## 7. MITRE ATT&CK Mapping
+## 8. MITRE ATT&CK Mapping
 
 | Module | Technique | ID |
 |---|---|---|
@@ -211,20 +254,21 @@ As a result, a fresh clone contains only the headers, `main.cpp`, `sqlite3.h`, a
 | `DpapiMasterKeys.h` | Credentials from Password Stores | T1555 |
 | `VaultDump.h` | Credentials from Password Stores | T1555 |
 | `ChromiumDump.h` | Credentials from Web Browsers | T1555.003 |
-| `ChromiumV20.h` | Credentials from Web Browsers | T1555.003 |
 | `GeckoAndIECookies.h` | Credentials from Web Browsers | T1555.003 |
 | `RdpDump.h` | Credentials from Password Stores | T1555 |
 | `DevCredentialsDump.h` | Unsecured Credentials: Credentials In Files | T1552.001 |
+| `CryptoKeysDump.h` (SSH, GPG, VPN) | Unsecured Credentials: Private Keys | T1552.004 |
+| `CryptoKeysDump.h` (Cloud CLI, configs) | Unsecured Credentials: Credentials In Files | T1552.001 |
 | `Pillaging.h` | Data from Local System | T1005 |
 
 ---
 
-## 8. Operational Security Notes
+## 9. Operational Security Notes
 
 * **No network activity.** Every module operates strictly against local files, the registry and Win32 APIs. There is no C2, no exfiltration, no beaconing.
 * **No persistence.** The binary does not install itself, modify autostart keys or schedule tasks. It is a one-shot harvester.
-* **No privilege escalation.** Every module runs in the context of the invoking user. Only `ChromiumV20.h` requires administrator rights, and it does not attempt to obtain them — it simply skips ABE entries if not elevated.
-* **Evidence left behind.** Reading `Login Data`, `Cookies`, `Local State` and `CREDHIST` leaves file-access artefacts; `CryptUnprotectData` calls are visible to EDR / ETW. This PoC is not stealthy by design — it is intended for controlled lab use where detection is part of the exercise.
+* **No privilege escalation.** Every module runs in the context of the invoking user. `CryptoKeysDump.h` will silently skip other users' profiles if the process lacks the necessary rights.
+* **Evidence left behind.** Reading `Login Data`, `Cookies`, `Local State` and registry keys leaves file-access artefacts; `CryptUnprotectData` calls are visible to EDR / ETW. This PoC is not stealthy by design — it is intended for controlled lab use where detection is part of the exercise.
 
 ---
 
