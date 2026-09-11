@@ -1,7 +1,6 @@
 # Promiscuous-CredsHarvester
 
-> *A Windows credential harvester built around the Data Protection API (DPAPI).*
-> *Academic proof-of-concept for red/blue team training and defensive research.*
+> Promiscuous-CredsHarvester — a Windows credential harvester built around DPAPI. Unlocks system credentials, browser secrets, developer tooling and cryptographic key material from a standard user session. Academic PoC for red/blue team training.*
 
 ---
 
