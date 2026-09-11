@@ -1,0 +1,5 @@
+DPAPI_PoC.exe
+libsqlite3.a
+sqlite3.o
+sqlite3.h
+sqlite3.c
