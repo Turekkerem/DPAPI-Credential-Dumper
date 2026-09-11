@@ -245,22 +245,31 @@ As a result, a fresh clone contains only the headers, `main.cpp`, `sqlite3.h`, a
 
 ## 8. MITRE ATT&CK Mapping
 
-| Module | Technique | ID |
-|---|---|---|
-| `SystemCredentialsDump.h` (CredMan) | Credentials from Password Stores: Windows Credential Manager | T1555.004 |
-| `SystemCredentialsDump.h` (Wi-Fi) | Credentials from Password Stores | T1555 |
-| `SystemCredentialsDump.h` (BitLocker) | Credentials from Password Stores | T1555 |
-| `SystemCredentialsDump.h` (Certificates) | Unsecured Credentials: Private Keys | T1552.004 |
-| `DpapiMasterKeys.h` | Credentials from Password Stores | T1555 |
-| `VaultDump.h` | Credentials from Password Stores | T1555 |
-| `ChromiumDump.h` | Credentials from Web Browsers | T1555.003 |
-| `GeckoAndIECookies.h` | Credentials from Web Browsers | T1555.003 |
-| `RdpDump.h` | Credentials from Password Stores | T1555 |
-| `DevCredentialsDump.h` | Unsecured Credentials: Credentials In Files | T1552.001 |
-| `CryptoKeysDump.h` (SSH, GPG, VPN) | Unsecured Credentials: Private Keys | T1552.004 |
-| `CryptoKeysDump.h` (Cloud CLI, configs) | Unsecured Credentials: Credentials In Files | T1552.001 |
-| `Pillaging.h` | Data from Local System | T1005 |
+| Module | Technique | ID | Notes |
+|---|---|---|---|
+| `SystemCredentialsDump.h` (CredMan) | Credentials from Password Stores: Windows Credential Manager | T1555.004 | Direct match — `CredEnumerateW` queries the Credential Manager store. |
+| `SystemCredentialsDump.h` (Wi-Fi) | Credentials from Password Stores | T1555 | Could also be classified under T1552.001 when Wi-Fi profiles are treated as XML config files. |
+| `SystemCredentialsDump.h` (BitLocker) | Credentials from Password Stores | T1555 | Recovery keys may also live in files (T1552.001); DPAPI-protected registry values are the primary target here. |
+| `SystemCredentialsDump.h` (Certificates) | Unsecured Credentials: Private Keys | T1552.004 | Certificate private keys exported via CAPI / CNG. |
+| `DpapiMasterKeys.h` | Credentials from Password Stores | T1555 | In some reporting this overlaps with OS Credential Dumping (T1003); T1555 is the credential-store-centric view. |
+| `VaultDump.h` | Credentials from Password Stores: Windows Credential Manager | T1555.004 | Windows Vault shares its backend with Credential Manager. Full plaintext extraction (COM API) would keep the same ID. |
+| `ChromiumDump.h` | Credentials from Web Browsers | T1555.003 | Passwords and cookies from Chromium-based browsers (Chrome, Edge, Brave, Vivaldi, Opera). |
+| `GeckoAndIECookies.h` | Steal Web Session Cookie | T1539 | **Primary:** the module harvests session cookies, not saved passwords. T1555.003 would apply only if `logins.json` were parsed. |
+| `RdpDump.h` | Credentials from Password Stores | T1555 | Could also be classified under T1552.001 — RDCMan `.rdg` and mstsc `.rdp` are config files on disk. |
+| `DevCredentialsDump.h` | Unsecured Credentials: Credentials In Files | T1552.001 | AWS, Azure, GCloud, NPM, PyPI, Netrc, Terraform, Docker, Kubernetes, mRemoteNG configs. |
+| `CryptoKeysDump.h` (SSH, GPG, VPN) | Unsecured Credentials: Private Keys | T1552.004 | SSH `id_*`, GnuPG `private-keys-v1.d`, WireGuard and OpenVPN key material. |
+| `CryptoKeysDump.h` (Cloud CLI, configs) | Unsecured Credentials: Credentials In Files | T1552.001 | Plaintext cloud CLI configurations and `.netrc`-style credential files. |
+| `Pillaging.h` | Data from Local System | T1005 | Generic file-system collection across Desktop, Documents and Downloads. |
 
+### 8.1 Mapping Notes
+
+* **`GeckoAndIECookies.h`** — the module currently reads `cookies.sqlite` (Firefox / Tor) and legacy IE `.txt` cookie files. It does **not** decrypt Firefox `logins.json`. If password extraction is added in a future iteration, the module should be mapped **twice**: T1539 (Steal Web Session Cookie) for cookies and T1555.003 (Credentials from Web Browsers) for saved passwords.
+
+* **`VaultDump.h`** — while the module currently only surfaces metadata (target, username, AppContainer SID) rather than plaintext secrets, the targeted store is the same as Windows Credential Manager, so T1555.004 remains the correct classification regardless of whether COM extraction is later added.
+
+* **`ChromiumDump.h` / `ChromiumV20.h`** — Chromium v20 App-Bound Encryption was intentionally omitted from this PoC (see section 4). If a future iteration implements ABE decryption, the technique ID stays T1555.003 but the module gains administrator-level SYSTEM impersonation as a prerequisite.
+
+* **`RdpDump.h`** and **`SystemCredentialsDump.h` (Wi-Fi)** — both operate on artefacts that live in files (`%USERPROFILE%\Documents\*.rdp`, `%USERPROFILE%\Documents\*.rdg`, Wi-Fi profile XMLs). Analysts who prefer the file-centric view can reasonably map these to T1552.001 in addition to the primary T1555.
 ---
 
 ## 9. Operational Security Notes
