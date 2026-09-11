@@ -1,11 +1,19 @@
-# Windows DPAPI & Security Credentials Abuse: Comprehensive Technical Overview
+# Promiscuous-CredsHarvester
+
+> *A Windows credential harvester built around the Data Protection API (DPAPI).*
+> *Academic proof-of-concept for red/blue team training and defensive research.*
+
+---
 
 ## 1. Introduction: Convenience vs. Security
-**"How Windows made security comfortable, but failed a little bit"**
 
-Modern operating systems face a fundamental design paradox: how to protect highly sensitive user secrets—such as browser credentials, Wi-Fi keys, and master encryption keys—while ensuring a completely seamless, friction-free user experience. Windows resolves this tension through the **Data Protection API (DPAPI)**, a cryptographic subsystem designed to transparently protect data using keys derived directly from the user's login credentials or the local system context.
+**"How Windows made security comfortable, but failed a little bit."**
+
+Modern operating systems face a fundamental design paradox: how to protect highly sensitive user secrets — such as browser credentials, Wi-Fi keys, and master encryption keys — while ensuring a completely seamless, friction-free user experience. Windows resolves this tension through the **Data Protection API (DPAPI)**, a cryptographic subsystem designed to transparently protect data using keys derived directly from the user's login credentials or the local system context.
 
 This architecture fundamentally prioritizes user convenience. Because DPAPI operates automatically within the active user's session context, any code executed under that user's security rights can invoke the API to unprotect secrets without prompting for a password or multi-factor verification. The operating system implicitly assumes that if a user is authenticated, any application executing within their session context is trustworthy.
+
+This is why the project is called **Promiscuous** — DPAPI does not ask *who* is requesting the decryption. It does not validate code signatures, file paths, or caller identity. It only asks *which user* the calling thread is running as. Any process in the user's session can call `CryptUnprotectData` and receive plaintext secrets.
 
 Consequently, this creates a significant security gap. Malware, unauthorized scripts, or local privilege escalation vectors running under a standard user account can effortlessly harvest plaintext Wi-Fi passwords, browser cookies, application tokens, and private cryptographic keys without ever needing to brute-force a master password.
 
