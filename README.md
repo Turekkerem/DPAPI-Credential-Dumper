@@ -202,7 +202,7 @@ Extraction of private keys, seed phrases, or mnemonics is **explicitly out of sc
 
 To compile the modular source code successfully within a Windows environment utilizing MSYS2 and the MinGW toolchain, execute the following command in the terminal:
 
-bash
+
 ```
 g++ main.cpp sqlite3.o -o DPAPI_PoC.exe -std=c++17 -O2 -lcrypt32 -lbcrypt -ladvapi32 -lwlanapi -lncrypt -lole32 -luuid -lshell32 -lshlwapi -static
 ```
