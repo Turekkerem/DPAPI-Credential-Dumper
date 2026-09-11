@@ -50,10 +50,12 @@ Consequently, this creates a significant security gap. Malware, unauthorized scr
   * This is the foundation for understanding what secrets the current user can actually unlock — without it, manual recovery of RDCMan, mRemoteNG and certificate blobs is impossible.
 
 * **`VaultDump.h`**:
-  * Enumerates Windows Vault contents through `vaultcmd`, **auto-discovering vault GUIDs** rather than relying on localized vault names.
-  * This makes the module language-independent: it parses the output of `vaultcmd /list`, extracts every GUID via regex, and then queries each vault individually with `vaultcmd /listcreds:"{GUID}" /all`.
-  * Produces a metadata-only dump (target name, username, AppContainer SID) of every stored vault entry. On a typical workstation the vault is populated mostly by Microsoft Store / AppContainer entries rather than user passwords.
-  * Note: `vaultcmd` does **not** reveal the plaintext secret. Full extraction requires the Windows Vault COM API (`VaultEnumerateVaults`, `VaultGetItem`) — planned as a future enhancement.
+  * Enumerates Windows Vault contents through the **native Vault API** (`vaultcli.dll`), loaded dynamically via `LoadLibrary` + `GetProcAddress` — no link-time dependency, no `-lvaultcli`.
+  * Calls `VaultEnumerateVaults`, `VaultOpenVault` and `VaultEnumerateItems` to walk every vault (Web Credentials, Windows Credentials) and retrieve each item's `Resource`, `Identity`, `AuthenticatorElement` and `PackageSid`.
+  * Extracts **plaintext secrets** from `ElementType_ByteArray` entries (interpreted as UTF-16LE), falling back to a hex dump when the payload cannot be decoded as a string.
+  * Uses a runtime-corrected `VAULT_ITEM_WIN8` / `VAULT_ITEM_ELEMENT` layout. On Windows 10/11 the MSDN-documented structure is out of date: the runtime inserts two extra `DWORD` fields before `Type`, and orders `LastModified` before `dwFlags` / `dwPropertiesCount`. Both facts were confirmed empirically and are now encoded in the struct definitions.
+  * If the native API returns zero items (typical on consumer machines, where the vault only holds Microsoft Store AppContainer tokens), the module falls back to `vaultcmd` via `_popen` and prints metadata only (target, username, SID). The fallback is language-independent: vault names are never hardcoded — GUIDs are extracted from `vaultcmd /list` and reused verbatim.
+  * **Note:** on a standard consumer workstation the Web Credentials vault contains only internal UWP tokens (`SnapshotEncryptionIV`, `SnapshotEncryptionKey`) and no user passwords. Real user credentials live in `Credential Manager` (see `SystemCredentialsDump.h`) and browser `Login Data` databases (see `ChromiumDump.h`).
 
 ### 2.3 Browser Credential Harvesting
 
