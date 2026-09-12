@@ -65,12 +65,22 @@ Consequently, this creates a significant security gap. Malware, unauthorized scr
   * Parses structured SQL databases using custom queries (`SELECT origin_url, username_value, password_value FROM logins;` and `SELECT host_key, name, encrypted_value FROM cookies;`) to isolate encrypted payloads.
   * Handles both legacy DPAPI-protected blobs and modern `v10` / `v11` AES-256-GCM entries.
 
+* **`FirefoxDump.h`**:
+  * Universal Mozilla-based browser credential extractor. Scans `%APPDATA%` recursively for any directory containing `key3.db` or `key4.db` alongside `logins.json`, and iterates over every profile found.
+  * Automatically covers Firefox, Firefox ESR, Tor Browser, Waterfox, LibreWolf, Mullvad Browser, Floorp, Pale Moon, SeaMonkey, IceCat, Cyberfox, and any future fork that reuses the Mozilla profile layout.
+  * Supports three key derivation paths:
+    * key3.db + 3DES-CBC (Firefox before 53, Pale Moon, SeaMonkey)
+    * key4.db + 3DES-CBC / v10 (Firefox 53 to 74)
+    * key4.db + PBES2 / AES-256-CBC / NSS SDR ASN.1 (Firefox 75 and later)
+  * Supports three login entry formats inside `logins.json`: `v10` (3DES), `v12` (AES-256-CBC), and ASN.1 SEQUENCE (NSS SDR, Firefox 132+).
+  * See section 4 for a full deep-dive into the Firefox key derivation quirks.
+
 * **`GeckoAndIECookies.h`**:
   * Extends cookie harvesting capabilities to alternative browser ecosystems.
   * Locates Mozilla Firefox and Tor Browser profiles within `%APPDATA%`, querying the `cookies.sqlite` database using SQL statements (`SELECT host, name, value FROM moz_cookies;`) to extract plaintext session cookies.
   * Scans legacy Internet Explorer cookie storage paths (`%APPDATA%\Microsoft\Windows\Cookies`) to read plaintext `.txt` cookie files.
 
-> **Note on App-Bound Encryption (v20):** Chrome 127+ and Edge 127+ introduced ABE, which binds credential encryption to the browser's own code integrity and requires administrator-level SYSTEM impersonation to bypass. This PoC **intentionally omits** ABE to remain a pure user-context, non-elevated tool. The design rationale is documented in section 4.
+> **Note on App-Bound Encryption (v20):** Chrome 127+ and Edge 127+ introduced ABE, which binds credential encryption to the browser's own code integrity and requires administrator-level SYSTEM impersonation to bypass. This PoC **intentionally omits** ABE to remain a pure user-context, non-elevated tool. The design rationale is documented in section 5.
 
 ### 2.4 Remote Access & Developer Credentials
 
@@ -140,7 +150,115 @@ Modern browsers like Google Chrome or Microsoft Edge do not encrypt every single
 
 ---
 
-## 4. Why App-Bound Encryption (Chromium v20+) Is Out of Scope
+## 4. Deep-Dive: How Mozilla Firefox Protects Logins
+
+Firefox takes a fundamentally different approach from Chromium. Instead of DPAPI, it relies on the NSS (Network Security Services) cryptographic stack, and the way it stores credentials has changed several times over the browser's history. Understanding these changes is what allows the extractor to work on every Mozilla-based fork from the last decade.
+
+### 4.1 The key databases
+
+Firefox credentials are split across three files inside each profile directory:
+
+* `key3.db` — legacy key database (Firefox before 53, Pale Moon, SeaMonkey).
+* `key4.db` — modern key database (Firefox 53 and later). SQLite format.
+* `logins.json` — saved login entries. Base64-encoded encrypted blobs.
+
+`key4.db` contains two tables that matter for credential recovery:
+
+* `metadata` — holds item1, which is the global salt plus a password-check blob.
+* `nssPrivate` — holds a11, which is the wrapped SDR key (Secret Decoder Ring). The row is identified by the 16-byte ID `f8 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01`.
+
+The SDR key is the actual AES or 3DES key used to encrypt every entry inside `logins.json`.
+
+### 4.2 The empty password case
+
+If the user has not set a Primary Password, NSS derives the SDR key with an empty password string. This is the most common case and the one our extractor handles. If a Primary Password is set, the same derivation requires that password; the extractor will detect the failure and skip the profile.
+
+### 4.3 PBES2 key derivation (Firefox 75 and later)
+
+Modern Firefox wraps the SDR key using PBES2 with PBKDF2-HMAC-SHA256 and AES-256-CBC. The `a11` blob is an ASN.1 DER structure. Schematically:
+
+```
+SEQUENCE {
+  SEQUENCE {                          AlgorithmIdentifier
+    OID  id-PBES2
+    SEQUENCE {                        PBES2-params
+      SEQUENCE {                      KDF
+        OID  id-PBKDF2
+        SEQUENCE {
+          OCTET STRING  salt
+          INTEGER       iterations
+        }
+      }
+      SEQUENCE {                      EncryptionScheme
+        OID  aes256-CBC
+        OCTET STRING  iv              14 bytes
+      }
+    }
+  }
+  OCTET STRING  encrypted_key         wrapped SDR key
+}
+```
+
+Two quirks matter:
+
+* The password for PBKDF2 is not the Primary Password itself. It is SHA1(global_salt + master_password). When no Primary Password is set, this becomes SHA1(global_salt).
+* The IV stored in the DER is only 14 bytes. AES-CBC requires 16. NSS stores only the random part and reconstructs the full IV by prefixing the constant bytes `04 0E` at runtime. This is an NSS implementation quirk, documented in Mozilla's own mailing lists. The extractor reconstructs the 16-byte IV as `{ 0x04, 0x0E } || stored_iv`.
+
+Once the SDR key is unwrapped, it is a plain 32-byte AES-256-CBC key.
+
+### 4.4 The legacy 3DES path (Firefox before 75)
+
+For older profiles, the SDR key is wrapped using 3DES-CBC with a SHA1-based NSS PBE construction. The derivation is:
+
+```
+hp  = SHA1(global_salt || master_password)
+pes = entry_salt padded to 20 bytes
+chp = SHA1(hp || entry_salt)
+k1  = HMAC-SHA1(chp, pes || entry_salt)
+tk  = HMAC-SHA1(chp, pes)
+k2  = HMAC-SHA1(chp, tk || entry_salt)
+key = k1 || k2      24-byte 3DES key
+iv  = last 8 bytes of key
+```
+
+This is the same algorithm used by the old `key3.db` format. The extractor implements both paths and falls back automatically.
+
+### 4.5 The logins.json entry format
+
+Every entry in `logins.json` is a base64-encoded string. The first three bytes of the decoded data identify the format:
+
+* `v10` — 3DES-CBC (Firefox 53 to 74).
+* `v12` — AES-256-CBC (Firefox 75 to 131).
+* `0x30` (ASN.1 SEQUENCE) — AES-256-CBC or 3DES (Firefox 132 and later, NSS SDR).
+
+The new SDR format looks like this:
+
+```
+SEQUENCE {
+  OCTET STRING  key_id          16 bytes, identifies the SDR key
+  SEQUENCE {                    AlgorithmIdentifier
+    OID  aes256-CBC (or 3DES)
+    OCTET STRING  iv
+  }
+  OCTET STRING  ciphertext
+}
+```
+
+Both username and password fields use the same structure, and both are decrypted with the SDR key recovered in step 4.3.
+
+### 4.6 Why this matters
+
+Most public tools, including older versions of firepwd, LaZagne, and various Python scripts, only handle the `v10` and `v12` legacy paths. As of Firefox 132, those paths are dead; every entry is now wrapped in ASN.1 SDR. This extractor is, to the author's knowledge, one of the few that handles all three formats in a single module, and the only one that also handles the NSS `04 0E` IV quirk without user intervention.
+
+### 4.7 What is deliberately not implemented
+
+* Primary Password brute-force. The extractor uses an empty password. If the profile is protected, the derivation simply fails and the profile is skipped. Adding a dictionary attack would move this module from academic PoC to credential cracker.
+* `signons.sqlite` (Firefox before 32). The pre-`logins.json` storage format is not supported. It is rare enough on modern systems that the cost and benefit do not justify the additional code.
+* Cross-device sync tokens. Firefox Sync credentials are stored separately and require a different cryptographic path. Out of scope.
+
+---
+
+## 5. Why App-Bound Encryption (Chromium v20+) Is Out of Scope
 
 Starting with Chrome 127 and Edge 127, Chromium browsers introduced **App-Bound Encryption (ABE)** to defend against exactly the kind of cookie and credential theft this PoC demonstrates. ABE raises the bar significantly by binding the encryption key to the browser's own code integrity, not just the user's DPAPI context.
 
@@ -160,46 +278,48 @@ As a result, the project focuses on `v10` / `v11` (AES-256-GCM + DPAPI), which r
 
 ---
 
-## 5. Roadmap: Planned Extensions
+## 6. Roadmap: Planned Extensions
 
-The project is intentionally structured so that additional modules can be dropped in without changing the existing ones. The two areas below are **planned** and marked as future work.
+The project is intentionally structured so that additional modules can be dropped in without changing the existing ones. The areas below are planned and marked as future work.
 
-### 5.1 Password Manager Vaults
+### 6.1 Password Manager Vaults
 
-Password managers are attractive PoC targets because they combine two distinct security layers:
-
-* An **unlock layer** — often DPAPI-protected (Windows User Account component, biometric key, device key).
-* A **vault layer** — encrypted with the manager's own key derivation (AES / ChaCha20 + master password).
+Password managers are attractive PoC targets because they combine two distinct security layers: an unlock layer that is often DPAPI-protected, and a vault layer encrypted with the manager's own key derivation (AES or ChaCha20 plus master password).
 
 A future module would target the unlock layer through DPAPI, and document the vault layer without attempting to break the underlying cryptographic construction. Candidates:
 
-* **KeePass** — `ProtectedUserKey.bin` (Windows User Account component), decryptable with `CryptUnprotectData`.
-* **Bitwarden** — `data.json` biometric key protected by DPAPI.
-* **1Password** — device key, partially DPAPI-protected.
+* KeePass — ProtectedUserKey.bin (Windows User Account component), decryptable with CryptUnprotectData.
+* Bitwarden — data.json biometric key protected by DPAPI.
+* 1Password — device key, partially DPAPI-protected.
 
-The goal is to demonstrate where DPAPI is — and where it is not — the actual security boundary.
+The goal is to demonstrate where DPAPI is, and where it is not, the actual security boundary.
 
-### 5.2 Crypto Wallet Credentials
+### 6.2 Crypto Wallet Credentials
 
-Many wallet applications use DPAPI to protect **saved configuration** and **session tokens**, even when the private keys themselves are encrypted with the wallet's own key derivation. A future module would target the DPAPI-protected layer only:
+Many wallet applications use DPAPI to protect saved configuration and session tokens, even when the private keys themselves are encrypted with the wallet's own key derivation. A future module would target the DPAPI-protected layer only:
 
 * Configuration files, saved passwords, session tokens.
 * Documented case studies of real-world infostealers that abuse DPAPI-protected wallet data.
 
-Extraction of private keys, seed phrases, or mnemonics is **explicitly out of scope** — this PoC remains a credential-harvesting research tool, not a crypto-stealer.
+Extraction of private keys, seed phrases, or mnemonics is explicitly out of scope. This PoC remains a credential-harvesting research tool, not a crypto-stealer.
 
-### 5.3 Additional Future Work
+### 6.3 Extension Storage
 
-* **Full Windows Vault extraction** via the native COM API (`VaultEnumerateVaults`, `VaultGetItem`) to recover plaintext secrets.
-* **CREDHIST** — DPAPI password history chain, with offline recovery support via Hashcat modes 15920 (3DES) and 15930 (AES-256).
-* **Additional browser coverage** — Opera GX, Yandex Browser, Waterfox, Pale Moon.
-* **Multi-profile iteration** for Chromium browsers (`Default`, `Profile 1`, `Profile 2`, …).
-* **Firefox `key4.db` + `logins.json`** password decryption (NSS PBE).
-* **JSON report export** for automated processing and MITRE ATT&CK mapping.
+Password manager extensions (Bitwarden, LastPass, 1Password, KeePassXC) store their unlock material inside the browser's extension storage rather than in the main profile. Chromium keeps this in `Local Extension Settings\<extension-id>\` (LevelDB) and IndexedDB; Firefox keeps it under `storage\default\moz-extension+++<UUID>\` inside each profile.
+
+A future module would scan both locations, parse the LevelDB files, and surface which extensions are installed and what keys they persist. The vault itself is not decrypted; the goal is to document where the boundary sits and how extensions differ from native credential stores.
+
+### 6.4 Additional Future Work
+
+* Windows Hello / NGC — as a separate, admin-only module, targeting `%LOCALAPPDATA%\Microsoft\Ngc\` and Windows Hello PIN hash extraction (Hashcat mode 31000).
+* JSON report export — consolidated output across all modules, with MITRE ATT&CK mapping embedded.
+* Detection notes — companion document with Sysmon, ETW and Sigma rules for each module.
+* Additional browser coverage — Opera GX, Yandex Browser.
+* Multi-profile iteration for Chromium browsers (Default, Profile 1, Profile 2, and so on).
 
 ---
 
-## 6. Project Compilation Guidelines
+## 7. Project Compilation Guidelines
 
 To compile the modular source code successfully within a Windows environment utilizing MSYS2 and the MinGW toolchain, execute the following command in the terminal:
 
@@ -210,7 +330,7 @@ g++ main.cpp sqlite3.o -o DPAPI_PoC.exe -std=c++17 -O2 -lcrypt32 -lbcrypt -ladva
 
 ---
 
-## 7. Project Layout
+## 8. Project Layout
 
 ```
 DPAPI-Abuser-PoC/
@@ -223,15 +343,16 @@ DPAPI-Abuser-PoC/
 ├── DpapiMasterKeys.h
 ├── VaultDump.h
 ├── ChromiumDump.h
-├── ChromiumV20.h
+├── FirefoxDump.h
 ├── GeckoAndIECookies.h
 ├── RdpDump.h
 ├── DevCredentialsDump.h
+├── CryptoKeysDump.h
 ├── Pillaging.h
 ├── sqlite3.h
-└── DPAPI_PoC.exe        (compiled binary, git-ignored)
+└── DPAPI_PoC.exe
 ```
-### 7.1 Files Ignored by Git
+### 8.1 Files Ignored by Git
 
 The following artefacts are present locally but excluded from the repository via `.gitignore`:
 
@@ -244,7 +365,7 @@ As a result, a fresh clone contains only the headers, `main.cpp`, `sqlite3.h`, a
 
 ---
 
-## 8. MITRE ATT&CK Mapping
+## 9. MITRE ATT&CK Mapping
 
 | Module | Technique | ID | Notes |
 |---|---|---|---|
@@ -255,6 +376,7 @@ As a result, a fresh clone contains only the headers, `main.cpp`, `sqlite3.h`, a
 | `DpapiMasterKeys.h` | Credentials from Password Stores | T1555 | In some reporting this overlaps with OS Credential Dumping (T1003); T1555 is the credential-store-centric view. |
 | `VaultDump.h` | Credentials from Password Stores: Windows Credential Manager | T1555.004 | Windows Vault shares its backend with Credential Manager. Full plaintext extraction (COM API) would keep the same ID. |
 | `ChromiumDump.h` | Credentials from Web Browsers | T1555.003 | Passwords and cookies from Chromium-based browsers (Chrome, Edge, Brave, Vivaldi, Opera). |
+| `FirefoxDump.h` | Credentials from Web Browsers | T1555.003 | Passwords from all Mozilla-based browsers: Firefox, Tor, Waterfox, LibreWolf, Mullvad, Floorp, Pale Moon, SeaMonkey, IceCat. |
 | `GeckoAndIECookies.h` | Steal Web Session Cookie | T1539 | **Primary:** the module harvests session cookies, not saved passwords. T1555.003 would apply only if `logins.json` were parsed. |
 | `RdpDump.h` | Credentials from Password Stores | T1555 | Could also be classified under T1552.001 — RDCMan `.rdg` and mstsc `.rdp` are config files on disk. |
 | `DevCredentialsDump.h` | Unsecured Credentials: Credentials In Files | T1552.001 | AWS, Azure, GCloud, NPM, PyPI, Netrc, Terraform, Docker, Kubernetes, mRemoteNG configs. |
@@ -262,7 +384,7 @@ As a result, a fresh clone contains only the headers, `main.cpp`, `sqlite3.h`, a
 | `CryptoKeysDump.h` (Cloud CLI, configs) | Unsecured Credentials: Credentials In Files | T1552.001 | Plaintext cloud CLI configurations and `.netrc`-style credential files. |
 | `Pillaging.h` | Data from Local System | T1005 | Generic file-system collection across Desktop, Documents and Downloads. |
 
-### 8.1 Mapping Notes
+### 9.1 Mapping Notes
 
 * **`GeckoAndIECookies.h`** — the module currently reads `cookies.sqlite` (Firefox / Tor) and legacy IE `.txt` cookie files. It does **not** decrypt Firefox `logins.json`. If password extraction is added in a future iteration, the module should be mapped **twice**: T1539 (Steal Web Session Cookie) for cookies and T1555.003 (Credentials from Web Browsers) for saved passwords.
 
@@ -270,10 +392,12 @@ As a result, a fresh clone contains only the headers, `main.cpp`, `sqlite3.h`, a
 
 * **`ChromiumDump.h` / `ChromiumV20.h`** — Chromium v20 App-Bound Encryption was intentionally omitted from this PoC (see section 4). If a future iteration implements ABE decryption, the technique ID stays T1555.003 but the module gains administrator-level SYSTEM impersonation as a prerequisite.
 
+* **`FirefoxDump.h`** — while the primary technique is T1555.003 (Credentials from Web Browsers), the module also reads session cookies indirectly through the same profile layout. If cookie extraction is added in a future iteration, T1539 (Steal Web Session Cookie) should be added as a secondary mapping.
+
 * **`RdpDump.h`** and **`SystemCredentialsDump.h` (Wi-Fi)** — both operate on artefacts that live in files (`%USERPROFILE%\Documents\*.rdp`, `%USERPROFILE%\Documents\*.rdg`, Wi-Fi profile XMLs). Analysts who prefer the file-centric view can reasonably map these to T1552.001 in addition to the primary T1555.
 ---
 
-## 9. Operational Security Notes
+## 10. Operational Security Notes
 
 * **No network activity.** Every module operates strictly against local files, the registry and Win32 APIs. There is no C2, no exfiltration, no beaconing.
 * **No persistence.** The binary does not install itself, modify autostart keys or schedule tasks. It is a one-shot harvester.
