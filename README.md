@@ -18,6 +18,20 @@ Consequently, this creates a significant security gap. Malware, unauthorized scr
 
 ---
 
+> [!TIP]
+> **Field observation — Avast behaviour during testing**
+>
+> During testing on a workstation with Avast Free Antivirus active, the following behaviour was observed. These are anecdotal notes, not controlled results, but they may be useful for anyone reproducing the PoC in a similar environment.
+>
+> * Avast did **not** block the tool outright. Credential harvesting from the Windows Credential Manager, Wi-Fi, DPAPI master keys, and the Chromium `Login Data` database was allowed to complete, with the AV showing what can only be described as enthusiasm for handing the results over.
+> * Cookie harvesting, however, consistently triggered a reaction. Avast appeared to focus on the `Cookies` SQLite database specifically — the process was intercepted at the point of copying the file, and subsequent access attempts returned `ACCESS_DENIED`. Reads of `Login Data` were not affected in the same way, which suggests the AV's signature set is tuned more aggressively toward cookie stores than toward password stores.
+> * The pattern was not deterministic across builds. Recompiling the same source with different optimisation flags sometimes changed which files were flagged and which were allowed through. This is likely a side effect of how Avast's heuristics evaluate the binary at load time rather than a property of the source itself.
+> * When `FirefoxDump.h` was added to the tool, Avast began blocking the process outright on launch — before any profile was even touched. Notably, the AV did **not** react to the Chromium or Gecko cookie modules in the same way. It reacted specifically to the presence of the Firefox password extraction code. Every other browser module was ignored. This is consistent with Avast having a dedicated signature or behaviour rule for the Mozilla NSS key derivation path, which is unusual given how obscure that code path is.
+>
+> **Takeaway:** AV behaviour against this PoC is inconsistent, build-dependent, and browser-specific in ways that are not obvious from the source. If you are running in a lab with an active AV, expect the results to differ between compilations of identical code. This is precisely the kind of signal that makes detection engineering interesting — and it is why the PoC is not designed to be stealthy.
+
+---
+
 ## 2. Comprehensive Technical Module Breakdown
 
 ### 2.1 Core & Entry Point
